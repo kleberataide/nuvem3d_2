@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GOES-19 HT — Visualização 3D (Three.js + WebGL)</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: #070b14;
+      color: #f8fafc;
+      overflow: hidden;
+    }
+    #canvas-container {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+    }
+    .hud {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      z-index: 10;
+      width: 320px;
+      background: rgba(15, 23, 42, 0.88);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+    }
+    .hud h1 {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+    .hud p {
+      font-size: 12px;
+      color: #cbd5e1;
+      margin-bottom: 12px;
+      line-height: 1.4;
+    }
+    .control {
+      margin-bottom: 12px;
+    }
+    .control label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      margin-bottom: 4px;
+    }
+    .control input[type="range"],
+    .control input[type="file"] {
+      width: 100%;
+    }
+    .colorbar {
+      height: 10px;
+      border-radius: 5px;
+      background: linear-gradient(90deg, #2563eb, #06b6d4, #22c55e, #eab308, #ef4444);
+      margin-top: 4px;
+    }
+    .scale-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      color: #cbd5e1;
+      margin-top: 3px;
+    }
+    .info {
+      margin-top: 10px;
+      font-size: 11px;
+      color: #93c5fd;
+      line-height: 1.4;
+    }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="canvas-container"></div>
+
+  <div class="hud">
+    <h1>GOES-19 HT — Topo de Nuvens (3D)</h1>
+    <p>Botão esquerdo: girar | Botão direito: mover | Scroll: zoom</p>
+
+    <div class="control">
+      <label for="fileInput"><span>Carregar GeoJSON local</span></label>
+      <input id="fileInput" type="file" accept=".geojson,.json" />
+    </div>
+
+    <div class="control">
+      <label for="exagInput">
+        <span>Exagero vertical</span>
+        <span id="exagLabel">30x</span>
+      </label>
+      <input id="exagInput" type="range" min="1" max="100" step="1" value="30" />
+    </div>
+
+    <div class="control">
+      <label for="sizeInput">
+        <span>Tamanho das partículas</span>
+        <span id="sizeLabel">0.18</span>
+      </label>
+      <input id="sizeInput" type="range" min="0.03" max="0.60" step="0.01" value="0.18" />
+    </div>
+
+    <div>
+      <span style="font-size:11px;">Altura do topo de nuvens (km)</span>
+      <div class="colorbar"></div>
+      <div class="scale-labels">
+        <span>0 km</span>
+        <span>5 km</span>
+        <span>10 km</span>
+        <span>15+ km</span>
+      </div>
+    </div>
+
+    <div id="info" class="info">Carregando GOES19_HT_Brasil_3D.geojson...</div>
+  </div>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+    const LON_MIN = -74.5;
+    const LON_MAX = -34.0;
+    const LAT_MIN = -34.0;
+    const LAT_MAX = 5.5;
+
+    // Escala horizontal em unidades da cena (1 grau ~ 10 unidades)
+    const SCENE_WIDTH = (LON_MAX - LON_MIN) * 10;
+    const SCENE_DEPTH = (LAT_MAX - LAT_MIN) * 10;
+
+    const container = document.getElementById("canvas-container");
+    const infoEl = document.getElementById("info");
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x070b14);
+
+    const camera = new THREE.PerspectiveCamera(
+      48,
+      window.innerWidth / window.innerHeight,
+      0.1,
+      2000
+    );
+    camera.position.set(0, 28, 38);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    container.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.06;
+
+    // Grade de referência no nível do solo (z = 0 m)
+    const grid = new THREE.GridHelper(Math.max(SCENE_WIDTH, SCENE_DEPTH) * 1.1, 20, 0x334155, 0x1e293b);
+    scene.add(grid);
+
+    // Moldura do recorte do Brasil na base
+    const borderGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(SCENE_WIDTH, 0.05, SCENE_DEPTH));
+    const borderMat = new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.45 });
+    const borderBox = new THREE.LineSegments(borderGeo, borderMat);
+    borderBox.position.y = 0.025;
+    scene.add(borderBox);
+
+    let cloudPoints = null;
+    let rawPoints = []; // { x, z, htMeters }
+    let elevationExag = 30;
+    let pointSize = 0.18;
+
+    function heightToRGB(htMeters) {
+      const t = Math.max(0, Math.min(1, htMeters / 16000));
+      const stops = [
+        [0.145, 0.388, 0.922], // #2563eb
+        [0.024, 0.714, 0.831], // #06b6d4
+        [0.133, 0.773, 0.369], // #22c55e
+        [0.918, 0.702, 0.031], // #eab308
+        [0.937, 0.267, 0.267]  // #ef4444
+      ];
+      const scaled = t * (stops.length - 1);
+      const idx = Math.min(stops.length - 2, Math.floor(scaled));
+      const localT = scaled - idx;
+      const c0 = stops[idx];
+      const c1 = stops[idx + 1];
+      return [
+        c0[0] + (c1[0] - c0[0]) * localT,
+        c0[1] + (c1[1] - c0[1]) * localT,
+        c0[2] + (c1[2] - c0[2]) * localT
+      ];
+    }
+
+    function rebuildCloud() {
+      if (cloudPoints) {
+        scene.remove(cloudPoints);
+        cloudPoints.geometry.dispose();
+        cloudPoints.material.dispose();
+        cloudPoints = null;
+      }
+      if (!rawPoints.length) return;
+
+      const positions = new Float32Array(rawPoints.length * 3);
+      const colors = new Float32Array(rawPoints.length * 3);
+
+      // Converte metros de altitude em unidades da cena com exagero vertical
+      const metersToSceneY = 0.001 * elevationExag;
+
+      for (let i = 0; i < rawPoints.length; i++) {
+        const pt = rawPoints[i];
+        positions[i * 3] = pt.x;
+        positions[i * 3 + 1] = Math.max(0, pt.htMeters * metersToSceneY);
+        positions[i * 3 + 2] = pt.z;
+
+        const [r, g, b] = heightToRGB(pt.htMeters);
+        colors[i * 3] = r;
+        colors[i * 3 + 1] = g;
+        colors[i * 3 + 2] = b;
+      }
+
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+
+      const material = new THREE.PointsMaterial({
+        size: pointSize,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.92
+      });
+
+      cloudPoints = new THREE.Points(geometry, material);
+      scene.add(cloudPoints);
+    }
+
+    function parseGeoJson(geojson) {
+      const features = Array.isArray(geojson.features) ? geojson.features : [];
+      const parsed = [];
+
+      for (const feat of features) {
+        if (!feat.geometry || feat.geometry.type !== "Point") continue;
+        const coords = feat.geometry.coordinates;
+        if (!Array.isArray(coords) || coords.length < 2) continue;
+
+        const lon = Number(coords[0]);
+        const lat = Number(coords[1]);
+        const htMeters = Number(feat.properties?.ht_m ?? coords[2] ?? 0);
+
+        if (!Number.isFinite(lon) || !Number.isFinite(lat) || !Number.isFinite(htMeters)) continue;
+
+        const normX = (lon - LON_MIN) / (LON_MAX - LON_MIN);
+        const normZ = (lat - LAT_MIN) / (LAT_MAX - LAT_MIN);
+
+        const x = (normX - 0.5) * SCENE_WIDTH;
+        const z = (0.5 - normZ) * SCENE_DEPTH; // norte para -Z
+
+        parsed.push({ x, z, htMeters });
+      }
+
+      rawPoints = parsed;
+      rebuildCloud();
+      infoEl.textContent = `Pontos 3D carregados: ${rawPoints.length.toLocaleString("pt-BR")}`;
+    }
+
+    fetch("./GOES19_HT_Brasil_3D.geojson")
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then(data => parseGeoJson(data))
+      .catch(() => {
+        infoEl.textContent = "Carregue o arquivo .geojson pelo botão acima ou acesse via servidor HTTP/GitHub Pages.";
+      });
+
+    document.getElementById("fileInput").addEventListener("change", event => {
+      const file = event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = e => {
+        try {
+          parseGeoJson(JSON.parse(e.target.result));
+        } catch {
+          infoEl.textContent = "Falha ao interpretar o arquivo GeoJSON.";
+        }
+      };
+      reader.readAsText(file);
+    });
+
+    document.getElementById("exagInput").addEventListener("input", e => {
+      elevationExag = Number(e.target.value);
+      document.getElementById("exagLabel").textContent = `${elevationExag}x`;
+      rebuildCloud();
+    });
+
+    document.getElementById("sizeInput").addEventListener("input", e => {
+      pointSize = Number(e.target.value);
+      document.getElementById("sizeLabel").textContent = pointSize.toFixed(2);
+      if (cloudPoints) {
+        cloudPoints.material.size = pointSize;
+      }
+    });
+
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+  </script>
+</body>
+</html>
